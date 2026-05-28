@@ -3,10 +3,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from deep_translator import GoogleTranslator
 from langdetect import detect, LangDetectException
+import os
 
 app = FastAPI()
 
-# Allow Chrome extension access
+# Allow extension access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,7 +16,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cache translations
 translation_cache = {}
 
 class TextRequest(BaseModel):
@@ -30,47 +30,68 @@ def root():
 def translate_text(request: TextRequest):
     text = request.text.strip()
 
-    # Empty or purely numerical/special character message check
-    if not text or len(text) <= 1:
-        return {"translated": text}
+    if not text:
+        return {"translated": "", "language": "unknown"}
 
-    # Cache check
     cache_key = f"{text}_{request.target}"
     if cache_key in translation_cache:
-        return {"translated": translation_cache[cache_key]}
+        return translation_cache[cache_key]
+
+    # Initialize variables
+    detected_language = "unknown"
+    is_fallback_used = False
+
+    # --- Pass 1: Primary Language Detection ---
+    try:
+        detected_language = detect(text)
+    except LangDetectException:
+        # langdetect failed (likely due to short text, emojis, or punctuation)
+        is_fallback_used = True
 
     try:
-        # Detect language with a fallback for short text/emojis
-        try:
-            detected_language = detect(text)
-        except LangDetectException:
-            detected_language = "unknown"
+        # Build the translator engine
+        # We use 'auto' source so Google's server-side engine acts as our ultimate safety net
+        translator = GoogleTranslator(source='auto', target=request.target)
 
-        # Skip translation if it's already in our target language
-        if detected_language == request.target:
-            return {"translated": text}
+        # --- Pass 2: Check for same-language shortcuts ---
+        # If Pass 1 confidently matched the target language, skip the API call to save resources
+        if not is_fallback_used and detected_language == request.target:
+            return {"translated": text, "language": detected_language, "skipped": True}
 
-        # Translate text safely
-        translated = GoogleTranslator(
-            source='auto',
-            target=request.target
-        ).translate(text)
+        # Translate the string
+        translated = translator.translate(text)
 
-        # Save to cache
-        translation_cache[cache_key] = translated
+        # --- Pass 3: Post-Translation Fallback Verification ---
+        # If Pass 1 completely missed or failed, we can deduce the true source language 
+        # by inspecting the metadata deep-translator naturally discovers during execution.
+        if is_fallback_used or detected_language == "unknown":
+            try:
+                # Ask deep_translator to pinpoint what it actually translated from
+                detected_language = translator.get_supported_languages(as_dict=True).get(
+                    translator.source, "unknown"
+                )
+                # If it's still generic 'auto', we map it nicely
+                if translator.source == 'auto':
+                    # A quick single-word secondary string validation check
+                    detected_language = "detected_via_api"
+            except:
+                detected_language = "fallback_mode"
 
-        return {"translated": translated}
+        # If the translated output is identical to the input text, it's already in the target language!
+        if translated.strip().toLowerCase() == text.strip().toLowerCase():
+            response_data = {"translated": text, "language": request.target, "cached": False}
+        else:
+            response_data = {"translated": translated, "language": detected_language, "cached": False}
+
+        # Cache the finalized schema block
+        translation_cache[cache_key] = response_data
+        return response_data
 
     except Exception as e:
-        print(f"Server-side translation error: {e}")
-        # Return the original text back so the extension doesn't break
-        return {"translated": text}
-    
-    if __name__ == "__main__":
+        print(f"Backend processing failure: {e}")
+        return {"translated": text, "language": "error", "error": str(e)}
 
-     import uvicorn
-    import os
-    # Render automatically sets the PORT environment variable
+if __name__ == "__main__":
+    import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    # Bind to 0.0.0.0 so it is accessible externally on the web
     uvicorn.run("main:app", host="0.0.0.0", port=port)
