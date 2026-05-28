@@ -37,53 +37,36 @@ def translate_text(request: TextRequest):
     if cache_key in translation_cache:
         return translation_cache[cache_key]
 
-    # Initialize variables
     detected_language = "unknown"
     is_fallback_used = False
 
-    # --- Pass 1: Primary Language Detection ---
+    # --- Pass 1: Language Detection ---
     try:
         detected_language = detect(text)
     except LangDetectException:
-        # langdetect failed (likely due to short text, emojis, or punctuation)
         is_fallback_used = True
 
     try:
-        # Build the translator engine
-        # We use 'auto' source so Google's server-side engine acts as our ultimate safety net
+        # Build translation client
         translator = GoogleTranslator(source='auto', target=request.target)
 
-        # --- Pass 2: Check for same-language shortcuts ---
-        # If Pass 1 confidently matched the target language, skip the API call to save resources
+        # Skip translation if langdetect confidently knows it's already the target language
         if not is_fallback_used and detected_language == request.target:
             return {"translated": text, "language": detected_language, "skipped": True}
 
-        # Translate the string
+        # Execute translation request
         translated = translator.translate(text)
 
-        # --- Pass 3: Post-Translation Fallback Verification ---
-        # If Pass 1 completely missed or failed, we can deduce the true source language 
-        # by inspecting the metadata deep-translator naturally discovers during execution.
+        # --- Pass 2: Post-Translation Identification ---
         if is_fallback_used or detected_language == "unknown":
-            try:
-                # Ask deep_translator to pinpoint what it actually translated from
-                detected_language = translator.get_supported_languages(as_dict=True).get(
-                    translator.source, "unknown"
-                )
-                # If it's still generic 'auto', we map it nicely
-                if translator.source == 'auto':
-                    # A quick single-word secondary string validation check
-                    detected_language = "detected_via_api"
-            except:
-                detected_language = "fallback_mode"
+            detected_language = "auto"
 
-        # If the translated output is identical to the input text, it's already in the target language!
-        if translated.strip().toLowerCase() == text.strip().toLowerCase():
-            response_data = {"translated": text, "language": request.target, "cached": False}
+        # FIXED: Corrected Python lowercasing syntax rule
+        if translated.strip().lower() == text.strip().lower():
+            response_data = {"translated": text, "language": request.target}
         else:
-            response_data = {"translated": translated, "language": detected_language, "cached": False}
+            response_data = {"translated": translated, "language": detected_language}
 
-        # Cache the finalized schema block
         translation_cache[cache_key] = response_data
         return response_data
 
